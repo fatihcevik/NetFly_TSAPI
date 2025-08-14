@@ -2,30 +2,72 @@
 
 ## 🎯 Overview
 
-This application provides real-time monitoring of call center agent status using Avaya's TSAPI (Telephony Services Application Programming Interface). It displays live agent states, call statistics, and system events in a professional dashboard interface.
+This application provides real-time monitoring of call center agent status using Avaya's TSAPI (Telephony Services Application Programming Interface) or JTAPI. It displays live agent states, call statistics, and system events in a professional dashboard interface.
+
+## ⚠️ Important Note About TSAPI Integration
+
+**TSAPI is NOT available as an npm package!** TSAPI is a proprietary Avaya SDK that comes as native Windows/Linux libraries. You have several implementation options:
+
+### Option 1: Windows Service with TSAPI SDK (Recommended)
+- Create a separate Windows Service using C#/.NET or C++
+- Use Avaya TSAPI SDK (native Windows libraries)
+- Expose data via REST API or WebSocket to Node.js backend
+- This is the most common production approach
+
+### Option 2: JTAPI Integration (Java-based)
+- Use Java with Avaya JTAPI libraries
+- Create a Java service that connects to Avaya
+- Expose data via REST API to Node.js backend
+- More portable than TSAPI but still requires Avaya JTAPI libraries
+
+### Option 3: Direct AES Integration
+- Connect directly to Avaya AES server using TCP/IP
+- Implement CSTA protocol manually
+- Most complex but gives full control
+
+### Option 4: Third-party Middleware
+- Use existing middleware solutions like Avaya Breeze
+- Connect through their APIs
+- Requires additional licensing
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   React Web     │    │   Node.js API    │    │   Avaya AES     │
-│   Dashboard     │◄──►│   Server         │◄──►│   TSAPI Server  │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   React Web     │    │   Node.js API    │    │  Windows Service │    │   Avaya AES     │
+│   Dashboard     │◄──►│   Server         │◄──►│  (C#/Java)      │◄──►│   TSAPI Server  │
+└─────────────────┘    └──────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
 ## 🔧 Prerequisites
 
 ### Avaya Infrastructure
 - **Avaya Aura Application Enablement Services (AES)** - TSAPI service host
-- **TSAPI Client** - Must be installed before SDK
-- **TSAPI SDK** - Development libraries and examples
+- **TSAPI Client** - Must be installed on Windows server
+- **TSAPI SDK** - Native Windows/Linux libraries (not npm package!)
 - **Valid TSAPI License** - From Avaya or authorized partner
 
 ### Development Environment
 - Node.js 18+ 
 - npm or yarn
 - TypeScript support
+- **Windows Server** (for TSAPI SDK) or Java environment (for JTAPI)
 - Access to Avaya AES server
+
+## 🚨 TSAPI SDK Integration Reality Check
+
+The TSAPI SDK is **NOT** a Node.js package. It's a native Windows/Linux library that requires:
+
+1. **Windows/Linux Installation**: Physical installation on the server
+2. **Native Code**: C/C++, C#, or Java integration
+3. **Licensing**: Proper Avaya licensing and permissions
+4. **Network Access**: Direct connection to Avaya AES server
+
+### Current Implementation Status
+- ✅ **Frontend Dashboard**: Complete and functional
+- ✅ **Node.js API Structure**: Ready for integration
+- ❌ **TSAPI SDK Integration**: Requires native implementation
+- ✅ **Simulator**: Working for development/demo
 
 ## 📦 Installation
 
@@ -36,21 +78,33 @@ cd tsapi-call-center-monitoring
 npm install
 ```
 
-### 2. Install TSAPI SDK (Windows/Linux)
+### 2. Choose Your Integration Approach
+
+#### Option A: Windows Service Approach (Recommended)
 ```bash
-# Download TSAPI SDK from Avaya DevConnect
-# Install TSAPI Client first, then SDK
-# Configure TSAPI Security Database access
+# 1. Create a separate Windows Service project
+# 2. Install Avaya TSAPI SDK on Windows server
+# 3. Implement TSAPI integration in C#/.NET
+# 4. Expose REST API endpoints
+# 5. Configure Node.js backend to consume the API
+```
+
+#### Option B: Java JTAPI Approach
+```bash
+# 1. Create Java application with JTAPI libraries
+# 2. Install Avaya JTAPI on server
+# 3. Implement JTAPI integration
+# 4. Expose REST API endpoints
+# 5. Configure Node.js backend to consume the API
 ```
 
 ### 3. Setup Backend API Server
 ```bash
 cd backend
 npm install
-# Configure TSAPI connection parameters
 cp .env.example .env
+# Configure connection to your TSAPI service (not direct TSAPI)
 ```
-
 ## ⚙️ Configuration
 
 ### Environment Variables (.env)

@@ -1,74 +1,77 @@
 import { EventEmitter } from 'events';
 import { Agent, AgentStatus, TSAPIEvent, CallCenterStats } from '../types/agent';
 import { logger } from '../utils/logger';
+import fetch from 'node-fetch'; // You'll need: npm install node-fetch @types/node-fetch
 
 /**
- * TSAPI Client Wrapper
- * This class wraps the actual TSAPI SDK calls and provides a clean interface
- * for the application to interact with Avaya AES server.
+ * TSAPI Client Wrapper for Node.js
+ * 
+ * IMPORTANT: This does NOT directly use TSAPI SDK (which is not available as npm package)
+ * Instead, it connects to a separate Windows Service or Java application that
+ * handles the actual TSAPI integration and exposes REST/WebSocket APIs.
+ * 
+ * Implementation Options:
+ * 1. Windows Service (C#/.NET) with TSAPI SDK -> REST API -> This Node.js client
+ * 2. Java Application with JTAPI -> REST API -> This Node.js client  
+ * 3. Direct TCP connection to AES (complex, requires CSTA protocol implementation)
  */
 export class TSAPIClient extends EventEmitter {
   private isConnected: boolean = false;
-  private connectionHandle: any = null;
+  private tsapiServiceUrl: string;
   private monitoredDevices: Set<string> = new Set();
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private pollingInterval: NodeJS.Timeout | null = null;
   
   private config = {
-    serverHost: process.env.TSAPI_SERVER_HOST || 'localhost',
-    serverPort: parseInt(process.env.TSAPI_SERVER_PORT || '450'),
-    applicationName: process.env.TSAPI_APPLICATION_NAME || 'CallCenterMonitor',
-    username: process.env.TSAPI_USERNAME || '',
-    password: process.env.TSAPI_PASSWORD || '',
-    timeout: parseInt(process.env.TSAPI_CLIENT_TIMEOUT || '30000')
+    // URL of your Windows Service or Java application that handles TSAPI
+    tsapiServiceUrl: process.env.TSAPI_SERVICE_URL || 'http://localhost:8080',
+    pollingInterval: parseInt(process.env.POLLING_INTERVAL || '5000'),
+    timeout: parseInt(process.env.TSAPI_CLIENT_TIMEOUT || '30000'),
+    apiKey: process.env.TSAPI_SERVICE_API_KEY || ''
   };
 
   constructor() {
     super();
-    this.setupEventHandlers();
+    this.tsapiServiceUrl = this.config.tsapiServiceUrl;
   }
 
   /**
-   * Initialize connection to TSAPI server
+   * Initialize connection to TSAPI service (Windows Service/Java App)
    */
   async connect(): Promise<boolean> {
     try {
-      logger.info('Connecting to TSAPI server...', {
-        host: this.config.serverHost,
-        port: this.config.serverPort,
-        application: this.config.applicationName
+      logger.info('Connecting to TSAPI service...', {
+        serviceUrl: this.tsapiServiceUrl
       });
 
-      // TODO: Replace with actual TSAPI SDK calls
-      // const tsapi = require('tsapi-sdk'); // This would be the actual TSAPI SDK
-      
-      // Example of what the real implementation would look like:
-      /*
-      this.connectionHandle = await tsapi.acsOpenStream(
-        this.config.serverHost,
-        this.config.applicationName,
-        this.config.username,
-        this.config.password,
-        {
-          invokeID: 1,
-          streamType: 'CSTA',
-          timeout: this.config.timeout
-        }
-      );
-      */
+      // Test connection to your TSAPI service
+      const response = await fetch(`${this.tsapiServiceUrl}/api/health`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: this.config.timeout
+      });
 
-      // For now, simulate connection
-      this.connectionHandle = { id: 'simulated-connection' };
+      if (!response.ok) {
+        throw new Error(`TSAPI service responded with ${response.status}: ${response.statusText}`);
+      }
+
+      const healthData = await response.json();
+      logger.info('TSAPI service health check passed', healthData);
+
       this.isConnected = true;
       
-      logger.info('TSAPI connection established');
+      logger.info('TSAPI service connection established');
       this.emit('connected');
       
-      // Start monitoring devices
-      await this.startDeviceMonitoring();
+      // Start polling for events and data
+      this.startPolling();
       
       return true;
     } catch (error) {
-      logger.error('Failed to connect to TSAPI server', error);
+      logger.error('Failed to connect to TSAPI service', error);
       this.emit('error', error);
       this.scheduleReconnect();
       return false;
@@ -76,7 +79,7 @@ export class TSAPIClient extends EventEmitter {
   }
 
   /**
-   * Disconnect from TSAPI server
+   * Disconnect from TSAPI service
    */
   async disconnect(): Promise<void> {
     try {
@@ -85,199 +88,104 @@ export class TSAPIClient extends EventEmitter {
         this.reconnectTimer = null;
       }
 
-      if (this.connectionHandle) {
-        // TODO: Replace with actual TSAPI SDK call
-        // await tsapi.acsCloseStream(this.connectionHandle);
-        
-        this.connectionHandle = null;
+      if (this.pollingInterval) {
+        clearInterval(this.pollingInterval);
+        this.pollingInterval = null;
       }
 
       this.isConnected = false;
       this.monitoredDevices.clear();
       
-      logger.info('TSAPI connection closed');
+      logger.info('TSAPI service connection closed');
       this.emit('disconnected');
     } catch (error) {
-      logger.error('Error disconnecting from TSAPI server', error);
+      logger.error('Error disconnecting from TSAPI service', error);
     }
   }
 
   /**
-   * Start monitoring agent devices
+   * Start polling for events and data from TSAPI service
    */
-  private async startDeviceMonitoring(): Promise<void> {
-    try {
-      // Get list of agent devices from configuration or discovery
-      const agentDevices = await this.getAgentDevices();
-      
-      for (const device of agentDevices) {
-        await this.monitorDevice(device);
-      }
-      
-      logger.info(`Started monitoring ${agentDevices.length} devices`);
-    } catch (error) {
-      logger.error('Failed to start device monitoring', error);
+  private startPolling(): void {
+    if (this.pollingInterval) {
+      return; // Already polling
     }
+
+    this.pollingInterval = setInterval(async () => {
+      try {
+        await this.pollForEvents();
+        await this.pollForAgentUpdates();
+      } catch (error) {
+        logger.error('Error during polling', error);
+      }
+    }, this.config.pollingInterval);
+
+    logger.info(`Started polling TSAPI service every ${this.config.pollingInterval}ms`);
   }
 
   /**
-   * Monitor a specific device for TSAPI events
+   * Poll for new events from TSAPI service
    */
-  private async monitorDevice(deviceId: string): Promise<void> {
+  private async pollForEvents(): Promise<void> {
     try {
-      if (this.monitoredDevices.has(deviceId)) {
-        return; // Already monitoring
-      }
-
-      // TODO: Replace with actual TSAPI SDK call
-      /*
-      const monitorCrossRefID = await tsapi.cstaMonitorDevice(
-        this.connectionHandle,
-        {
-          deviceObject: {
-            deviceType: 'deviceIdentifier',
-            deviceIdentifier: deviceId
-          },
-          monitorFilter: {
-            call: true,
-            feature: true,
-            agent: true,
-            maintenance: false
-          }
+      const response = await fetch(`${this.tsapiServiceUrl}/api/events/recent`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
         }
-      );
-      */
+      });
 
-      this.monitoredDevices.add(deviceId);
-      logger.debug(`Started monitoring device: ${deviceId}`);
-      
-    } catch (error) {
-      logger.error(`Failed to monitor device ${deviceId}`, error);
-      
-      // Handle specific TSAPI errors
-      if (error.message?.includes('TSERVER_DEVICE_NOT_SUPPORTED')) {
-        logger.warn(`Device ${deviceId} not supported or no permissions`);
+      if (response.ok) {
+        const events = await response.json();
+        events.forEach((event: any) => {
+          this.handleTSAPIEvent(event);
+        });
       }
+    } catch (error) {
+      logger.debug('Error polling for events', error);
     }
   }
 
   /**
-   * Get list of agent devices to monitor
+   * Poll for agent status updates from TSAPI service
    */
-  private async getAgentDevices(): Promise<string[]> {
-    // TODO: This could come from:
-    // 1. TSAPI device discovery
-    // 2. Database configuration
-    // 3. Environment variables
-    // 4. External API
-    
-    const devices = process.env.TSAPI_AGENT_DEVICES?.split(',') || [];
-    
-    if (devices.length === 0) {
-      // Generate sample device list for demonstration
-      return Array.from({ length: 12 }, (_, i) => `AGENT_${String(i + 1).padStart(3, '0')}`);
+  private async pollForAgentUpdates(): Promise<void> {
+    try {
+      const response = await fetch(`${this.tsapiServiceUrl}/api/agents/status`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (response.ok) {
+        const agentData = await response.json();
+        // Process agent status updates
+        this.emit('agentStatusUpdate', agentData);
+      }
+    } catch (error) {
+      logger.debug('Error polling for agent updates', error);
     }
-    
-    return devices;
   }
 
   /**
-   * Setup TSAPI event handlers
+   * Handle TSAPI events from the service
    */
-  private setupEventHandlers(): void {
-    // TODO: Setup actual TSAPI event handlers
-    /*
-    tsapi.on('cstaAgentLoggedOn', (event) => {
-      this.handleAgentLoggedOn(event);
-    });
-
-    tsapi.on('cstaAgentLoggedOff', (event) => {
-      this.handleAgentLoggedOff(event);
-    });
-
-    tsapi.on('cstaAgentStateChanged', (event) => {
-      this.handleAgentStateChanged(event);
-    });
-
-    tsapi.on('cstaAgentWorkMode', (event) => {
-      this.handleAgentWorkMode(event);
-    });
-    */
-  }
-
-  /**
-   * Handle Agent Logged On event
-   */
-  private handleAgentLoggedOn(event: any): void {
+  private handleTSAPIEvent(event: any): void {
     const tsapiEvent: TSAPIEvent = {
-      id: `event-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      timestamp: new Date(),
-      type: 'AgentLoggedOn',
-      agentId: event.agentID,
-      newState: 'logged-on',
-      details: `Agent ${event.agentID} logged on to device ${event.device}`
+      id: event.id || `event-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date(event.timestamp),
+      type: event.type,
+      agentId: event.agentId,
+      oldState: event.oldState,
+      newState: event.newState,
+      details: event.details
     };
 
-    logger.info('Agent logged on', { agentId: event.agentID, device: event.device });
+    logger.info(`TSAPI Event: ${event.type}`, { agentId: event.agentId });
     this.emit('agentEvent', tsapiEvent);
-  }
-
-  /**
-   * Handle Agent Logged Off event
-   */
-  private handleAgentLoggedOff(event: any): void {
-    const tsapiEvent: TSAPIEvent = {
-      id: `event-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      timestamp: new Date(),
-      type: 'AgentLoggedOff',
-      agentId: event.agentID,
-      oldState: 'logged-on',
-      newState: 'logged-off',
-      details: `Agent ${event.agentID} logged off from device ${event.device}`
-    };
-
-    logger.info('Agent logged off', { agentId: event.agentID, device: event.device });
-    this.emit('agentEvent', tsapiEvent);
-  }
-
-  /**
-   * Handle Agent State Changed event
-   */
-  private handleAgentStateChanged(event: any): void {
-    const tsapiEvent: TSAPIEvent = {
-      id: `event-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      timestamp: new Date(),
-      type: 'AgentStateChanged',
-      agentId: event.agentID,
-      oldState: this.mapTSAPIState(event.oldAgentState),
-      newState: this.mapTSAPIState(event.newAgentState),
-      details: `Agent ${event.agentID} changed from ${event.oldAgentState} to ${event.newAgentState}`
-    };
-
-    logger.info('Agent state changed', { 
-      agentId: event.agentID, 
-      oldState: event.oldAgentState, 
-      newState: event.newAgentState 
-    });
-    
-    this.emit('agentEvent', tsapiEvent);
-  }
-
-  /**
-   * Map TSAPI agent states to application states
-   */
-  private mapTSAPIState(tsapiState: string): AgentStatus {
-    const stateMap: Record<string, AgentStatus> = {
-      'AS_LOG_IN': 'logged-on',
-      'AS_LOG_OUT': 'logged-off',
-      'AS_NOT_READY': 'not-ready',
-      'AS_READY': 'available',
-      'AS_WORK_NOT_READY': 'busy',
-      'AS_WORK_READY': 'acw',
-      'AS_BUSY_OTHER': 'busy'
-    };
-
-    return stateMap[tsapiState] || 'not-ready';
   }
 
   /**
@@ -292,7 +200,7 @@ export class TSAPIClient extends EventEmitter {
     
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
-      logger.info('Attempting to reconnect to TSAPI server...');
+      logger.info('Attempting to reconnect to TSAPI service...');
       await this.connect();
     }, reconnectDelay);
   }
@@ -317,22 +225,21 @@ export class TSAPIClient extends EventEmitter {
   async queryAgent(agentId: string): Promise<Agent | null> {
     try {
       if (!this.isConnected) {
-        throw new Error('TSAPI not connected');
+        throw new Error('TSAPI service not connected');
       }
 
-      // TODO: Replace with actual TSAPI query
-      /*
-      const response = await tsapi.cstaQueryAgent(
-        this.connectionHandle,
-        {
-          agent: agentId
+      const response = await fetch(`${this.tsapiServiceUrl}/api/agents/${agentId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
         }
-      );
-      
-      return this.mapTSAPIAgentToAgent(response);
-      */
+      });
 
-      // Simulated response for now
+      if (response.ok) {
+        return await response.json();
+      }
+      
       return null;
     } catch (error) {
       logger.error(`Failed to query agent ${agentId}`, error);
@@ -346,19 +253,21 @@ export class TSAPIClient extends EventEmitter {
   async getCallCenterStats(): Promise<CallCenterStats | null> {
     try {
       if (!this.isConnected) {
-        throw new Error('TSAPI not connected');
+        throw new Error('TSAPI service not connected');
       }
 
-      // TODO: Replace with actual TSAPI queries for statistics
-      /*
-      const stats = await Promise.all([
-        tsapi.cstaQueryDeviceInfo(...),
-        tsapi.cstaQueryCallCenterStats(...),
-        // Other statistical queries
-      ]);
-      */
+      const response = await fetch(`${this.tsapiServiceUrl}/api/stats`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+          'Content-Type': 'application/json'
+        }
+      });
 
-      // Return simulated stats for now
+      if (response.ok) {
+        return await response.json();
+      }
+      
       return null;
     } catch (error) {
       logger.error('Failed to get call center statistics', error);
